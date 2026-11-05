@@ -11,7 +11,10 @@
      open: qty = quantity in hand on that date, rate = cost per unit. adj: qty signed (+ in, − out), reason code.
    Which lines count: item masters marked as goods, or any name that was bought, opened or adjusted.
    Services (master kind 'service' or SAC code 99…) and names that were only ever sold are left out.
-   Value: weighted average cost of opening stock and purchases (rate after discount, without GST) up to the date.
+   Value: weighted average cost of opening stock and purchases (rate after discount, without GST) up to the date, or FIFO
+   (first in, first out: the stock in hand is valued at the cost of the latest purchases) when My data › Settings says so
+   (meta settings.stockValue 'fifo'; pages call NSStock.valuation(settings.stockValue) after loading). Both are allowed by
+   AS 2 (Valuation of Inventories); use the same method every year. Under FIFO a purchase return comes off the newest lot.
    Batch 2 (godowns, batches, manufacturing):
      godown   d.gd on a bill (or it.gd on a line) = the godown the goods left or came into; '' = the main godown.
      move     { type:'stk', kind:'move', from, to, lines:[{ desc, unit, qty, batch }] }: stock transfer between godowns
@@ -44,8 +47,10 @@
   function gdOk(x, gd) { if (gd == null || gd === '') return x.src !== 'move'; return key(x.g || MAIN) === key(gd); }
 
   /* every stock movement of one business, in date order: { k, name, unit, date, qty (+ in / − out), rate (cost, in only), src, reason, d } */
+  /* manufacturing extras (mfgcore.js): job work, by-products and second units become plain records first */
+  function mfg() { return G.NSMfg || (typeof require === 'function' ? require('./mfgcore.js') : null); }
   function moves(docs, items, biz) {
-    var b = key(biz), M = {}, out = [];
+    var b = key(biz), M = {}, out = [], X = mfg(); if (X) docs = X.expand(docs, items);
     (items || []).forEach(function (m) { if (m && m.desc) M[key(m.desc)] = m; });
     (docs || []).forEach(function (d) {
       if (b && bizOf(d) !== b) return;
@@ -105,7 +110,7 @@
   }
 
   /* summary of every tracked item for a period: opening, in, out, adjust, closing, average cost, value, low */
-  function summary(docs, items, biz, from, to, gd) {
+  function summary(docs, items, biz, from, to, gd, how) {
     var all = moves(docs, items, biz), T = tracked(all, items), S = {}, CQ = {};
     var mv = all.filter(function (x) { return gdOk(x, gd); });
     /* average cost is the business's own, whichever godown the goods sit in */
@@ -120,18 +125,40 @@
       else s.outq -= x.qty;
       s.n++;
     });
-    var tot = 0, low = 0, neg = 0;
+    var tot = 0, low = 0, neg = 0, fifo = (how || VAL) === 'fifo', BQ = {};
+    /* FIFO: the business's own quantity in hand (all godowns) is valued from the newest lots back */
+    if (fifo) all.forEach(function (x) { if (to && x.date > to || x.src === 'move') return; BQ[x.k] = (BQ[x.k] || 0) + x.qty; });
     var list = Object.keys(S).map(function (k) {
       var s = S[k];
       s.open = r3(s.open); s.inq = r3(s.inq); s.outq = r3(s.outq); s.adj = r3(s.adj);
       s.close = r3(s.open + s.inq - s.outq + s.adj);
       var c = CQ[k]; s.cost = c && c[0] > 0 ? r2(c[1] / c[0]) : 0;
-      s.value = s.close > 0 ? r2(s.close * s.cost) : 0;
+      if (fifo) { var bq = r3(BQ[k] || 0), fv = bq > 0 ? fifoValue(all, k, to, bq, s.cost) : 0; if (bq > 0) s.cost = r2(fv / bq); s.value = s.close > 0 ? (s.close === bq ? fv : r2(s.close * s.cost)) : 0; }
+      else s.value = s.close > 0 ? r2(s.close * s.cost) : 0;
       s.low = s.min > 0 && s.close <= s.min;
             tot = r2(tot + s.value); if (s.low) low++; if (s.close < 0) neg++;
       return s;
     }).sort(function (a, b) { return a.name.localeCompare(b.name); });
     return { items: list, value: tot, low: low, neg: neg };
+  }
+
+  /* stock valuation method of the books: 'avg' (weighted average, the default) or 'fifo'; summary(..., how) can ask for either */
+  var VAL = 'avg';
+  function valuation(m) { if (m !== undefined) VAL = m === 'fifo' ? 'fifo' : 'avg'; return VAL; }
+  /* FIFO value of qty units of item k in hand on `to`: lots bought (opening stock, purchases, production) in date order, a purchase
+     return takes its quantity off the newest lots; the stock in hand is the newest lots. A quantity with no priced lot left
+     (for example goods found on a count) is valued at `fallback` (the average cost). */
+  function fifoValue(mv, k, to, qty, fallback) {
+    var lots = [];
+    mv.forEach(function (x) {
+      if (x.k !== k || to && x.date > to) return;
+      if (x.rate != null && x.qty > 0) lots.push([x.qty, x.rate]);
+      else if (x.src === 'pret') { var q = -x.qty; for (var i = lots.length - 1; i >= 0 && q > 0; i--) { var t = Math.min(q, lots[i][0]); lots[i][0] -= t; q -= t; } }
+    });
+    var left = qty, v = 0;
+    for (var j = lots.length - 1; j >= 0 && left > 0.0005; j--) { var u = Math.min(left, lots[j][0]); v += u * lots[j][1]; left -= u; }
+    if (left > 0.0005) v += left * (fallback || 0);
+    return r2(v);
   }
 
   /* one item's register: opening, rows with running balance, closing */
@@ -203,7 +230,157 @@
     return { lines: out, total: r2(tot) };
   }
 
+  /* ---------- Stock ledger (groups, ledgers of many items, godown and batch views, movement report) ----------
+     Item groups (meta 'groups'.item = [{ id, name, under }], under = '' or a top group id; one level of sub-groups).
+     An item's group: item.group (id), else a group named like item.cat, else the category itself as a group of its own
+     (so categories typed so far show as groups), else no group. NS.itemGroup in core.js, when there, decides instead. */
+  function itemGroupOf(m, groups) {
+    var G = groups || [], g = m && m.group ? G.filter(function (x) { return x.id === m.group; })[0] : null;
+    if (!g && m && m.cat) g = G.filter(function (x) { return key(x.name) === key(m.cat); })[0] || { id: 'cat:' + key(m.cat), name: String(m.cat).trim(), under: '' };
+    if (!g) return { id: '', name: '', top: '' };
+    return { id: g.id, name: g.name, top: g.under || '' };
+  }
+  /* list of rows (anything with .m = item master) sorted into groups: [{ id, name, list, subs: [{ id, name, list, tot }], tot }]
+     gOf(m) -> { id, name, top }; fields = the numbers to add up; groups without a name ("No group") come last */
+  function groupTree(list, gOf, groups, fields) {
+    var G = groups || [], T = {}, order = [];
+    function nameOf(id) { var g = G.filter(function (x) { return x.id === id; })[0]; return g ? g.name : ''; }
+    function node(id, name) { if (!T[id]) { T[id] = { id: id, name: name, list: [], subs: [], S: {}, tot: {} }; order.push(id); } return T[id]; }
+    function add(tot, x) { (fields || []).forEach(function (f) { tot[f] = r3((tot[f] || 0) + num(x[f])); }); tot.n = (tot.n || 0) + 1; }
+    (list || []).forEach(function (x) {
+      var g = gOf(x.m || null) || {}, top = g.top ? node(g.top, g.topName || nameOf(g.top) || g.top) : node(g.id || '', g.name || '');
+      if (g.top) { var s = top.S[g.id]; if (!s) { s = top.S[g.id] = { id: g.id, name: g.name, list: [], tot: {} }; top.subs.push(s); } s.list.push(x); add(s.tot, x); }
+      else top.list.push(x);
+      add(top.tot, x);
+    });
+    return order.map(function (id) { var n = T[id]; delete n.S; n.subs.sort(function (a, b) { return a.name.localeCompare(b.name); }); return n; })
+      .sort(function (a, b) { return !a.id - !b.id || a.name.localeCompare(b.name); });
+  }
+  /* voucher type of a movement, for the ledger filter */
+  var VT = { open: 'open', buy: 'buy', sret: 'sret', sale: 'sale', pret: 'pret', adj: 'adj', move: 'move', make: 'make', use: 'make' };
+  function partyOf(x) { var d = x.d || {}; if (x.src === 'move') return (d.from || 'Main') + ' → ' + (d.to || 'Main'); return d.buyer && d.buyer.name || ''; }
+  /* ledgers of many items at once.  o = { keys: [k] (null = every tracked item), from, to, gd (godown, see gdOk), types: { vt: 1 } (null = all) }
+     Each: { k, name, unit, m, open, openValue, rows: [{ date, vt, no, party, inq, outq, bal, cost, value, neg, x }], inq, outq, close, cost, value, neg }
+     The running balance counts every movement; the type filter only hides rows (their in/out leave the totals too).
+     cost = weighted average cost of everything that came in up to that row's date (the summary's cost at `to`). */
+  function ledgers(docs, items, biz, o) {
+    o = o || {};
+    var all = moves(docs, items, biz), T = tracked(all, items), want = o.keys ? {} : null, by = {};
+    if (want) o.keys.forEach(function (k) { want[k] = 1; });
+    all.forEach(function (x) { if (T[x.k] && (!want || want[x.k])) (by[x.k] = by[x.k] || []).push(x); });
+    return Object.keys(T).filter(function (k) { return !want || want[k]; }).map(function (k) {
+      var t = T[k], open = 0, bal = 0, rows = [], inq = 0, outq = 0, neg = 0, c = [0, 0], oc = 0;
+      function cost() { return c[0] > 0 ? r2(c[1] / c[0]) : 0; }
+      (by[k] || []).forEach(function (x) {
+        if (o.to && x.date > o.to) return;
+        if (o.from && x.date >= o.from && !oc) oc = cost() || -1;
+        if (x.rate != null && x.qty > 0) { c[0] += x.qty; c[1] += x.qty * x.rate; }
+        if (!gdOk(x, o.gd)) return;
+        bal = r3(bal + x.qty);
+        if (o.from && x.date < o.from) { open = bal; return; }
+        var vt = VT[x.src] || x.src, cc = cost(), row = { date: x.date, vt: vt, src: x.src, reason: x.reason, no: x.d.no || x.d.billNo || '', party: partyOf(x),
+          inq: x.qty > 0 ? x.qty : 0, outq: x.qty < 0 ? -x.qty : 0, bal: bal, cost: cc, value: bal > 0 ? r2(bal * cc) : 0, neg: bal < 0, batch: x.batch, x: x };
+        if (row.neg) neg++;
+        if (o.types && !o.types[vt]) return;
+        inq = r3(inq + row.inq); outq = r3(outq + row.outq); rows.push(row);
+      });
+      if (!oc) oc = cost();
+      return { k: k, name: t.name, unit: t.unit, m: t.m, min: t.min, open: open, openValue: open > 0 && oc > 0 ? r2(open * oc) : 0, rows: rows, inq: inq, outq: outq,
+        close: bal, cost: cost(), value: bal > 0 ? r2(bal * cost()) : 0, neg: neg };
+    }).sort(function (a, b) { return a.name.localeCompare(b.name); });
+  }
+  /* totals of several ledgers (a group, or all items): { open, inq, outq, close, openValue, value, neg (items that went below zero) } */
+  function ledgerTotals(L) {
+    var t = { open: 0, inq: 0, outq: 0, close: 0, openValue: 0, value: 0, neg: 0 };
+    (L || []).forEach(function (l) { ['open', 'inq', 'outq', 'close'].forEach(function (f) { t[f] = r3(t[f] + l[f]); }); t.openValue = r2(t.openValue + l.openValue); t.value = r2(t.value + l.value); t.neg += l.neg ? 1 : 0; });
+    return t;
+  }
+  /* stock of every item in each godown on a date: { gds: ['' (main), names…], keys (godown keys, same order), rows: [{ k, name, unit, m, q: { godown key: qty }, total, value }], tot } */
+  function godownMatrix(docs, items, biz, upto, names) {
+    var G = godowns(docs, items, biz, upto, names), R = {}, tot = {};
+    G.forEach(function (g) {
+      var gk = key(g.g || MAIN);
+      g.items.forEach(function (s) {
+        var r = R[s.k] = R[s.k] || { k: s.k, name: s.name, unit: s.unit, m: s.m, q: {}, total: 0, value: 0 };
+        r.q[gk] = s.close; r.total = r3(r.total + s.close); tot[gk] = r3((tot[gk] || 0) + s.close);
+      });
+    });
+    var S = {}; summary(docs, items, biz, '', upto).items.forEach(function (s) { S[s.k] = s; });
+    var rows = Object.keys(R).map(function (k) { var r = R[k]; r.value = S[k] ? S[k].value : 0; return r; })
+      .filter(function (r) { return Object.keys(r.q).some(function (g) { return r.q[g]; }); }).sort(function (a, b) { return a.name.localeCompare(b.name); });
+    return { gds: G.map(function (g) { return g.g; }), keys: G.map(function (g) { return key(g.g || MAIN); }), rows: rows, tot: tot };
+  }
+  /* each batch of one item with its own in, out and balance: [{ batch, exp, end, open, rows: [{ date, vt, no, party, inq, outq, bal, neg, x }], inq, outq, close }]
+     Goods going out take their own batch first, then the earliest expiry first (as batches()); what no batch can cover
+     stays on the line's own batch (or "no batch") as a minus balance, so the warning shows where it happened. */
+  function batchLedger(docs, items, biz, k, from, to, gd) {
+    var by = {}, order = [];
+    function get(b, exp) { var id = key(b); if (!by[id]) { by[id] = { batch: b || '', exp: exp || '', bal: 0, open: 0, rows: [], inq: 0, outq: 0 }; order.push(id); } if (exp && !by[id].exp) by[id].exp = exp; return by[id]; }
+    function put(B, x, q) {
+      B.bal = r3(B.bal + q);
+      if (from && x.date < from) { B.open = B.bal; return; }
+      var r = { date: x.date, vt: VT[x.src] || x.src, src: x.src, reason: x.reason, no: x.d.no || x.d.billNo || '', party: partyOf(x), inq: q > 0 ? q : 0, outq: q < 0 ? -q : 0, bal: B.bal, neg: B.bal < 0, x: x };
+      B.inq = r3(B.inq + r.inq); B.outq = r3(B.outq + r.outq); B.rows.push(r);
+    }
+    moves(docs, items, biz).forEach(function (x) {
+      if (x.k !== k || to && x.date > to || !gdOk(x, gd)) return;
+      if (x.qty > 0) { put(get(x.batch, x.exp), x, x.qty); return; }
+      var need = r3(-x.qty), own = x.batch && by[key(x.batch)];
+      if (own && own.bal > 0) { var t = Math.min(need, own.bal); put(own, x, -t); need = r3(need - t); }
+      order.map(function (id) { return by[id]; }).filter(function (b) { return b.bal > 0; }).sort(function (a, b) { return (a.exp || '9999').localeCompare(b.exp || '9999'); }).forEach(function (b) {
+        if (need <= 0) return; var t2 = Math.min(need, b.bal); put(b, x, -t2); need = r3(need - t2);
+      });
+      if (need > 0.0005) put(get(x.batch, x.exp), x, -need);
+    });
+    return order.map(function (id) { var b = by[id]; b.close = b.bal; b.end = expEnd(b.exp); delete b.bal; return b; })
+      .filter(function (b) { return b.rows.length || b.open; })
+      .sort(function (a, b) { return (a.exp || '9999').localeCompare(b.exp || '9999') || a.batch.localeCompare(b.batch); });
+  }
+  /* fast, slow and non-moving items.  Period from..to; days = no movement for this many days up to `to` (default 90).
+     sold = quantity sold in the period (sales less sales returns); lastSale = last sale up to `to`; lastMove = last movement
+     of any kind except opening stock and godown transfers; idle = days since lastMove (or since the first entry);
+     cover = days the closing stock lasts at the period's selling speed.
+     fast = the top third of the items sold in the period by value sold at cost (at least one);
+     none = in hand and nothing moved for `days` days; slow = every other item sold or in hand. */
+  function movement(docs, items, biz, from, to, days) {
+    days = days == null || days === '' ? 90 : num(days);
+    var all = moves(docs, items, biz), T = tracked(all, items), S = {}, A = {};
+    summary(docs, items, biz, from, to).items.forEach(function (s) { S[s.k] = s; });
+    Object.keys(T).forEach(function (k) { A[k] = { k: k, name: T[k].name, unit: T[k].unit, m: T[k].m, sold: 0, lastSale: '', lastMove: '', first: '' }; });
+    all.forEach(function (x) {
+      var a = A[x.k]; if (!a || to && x.date > to || x.src === 'move') return;
+      if (!a.first) a.first = x.date;
+      if (x.src !== 'open') a.lastMove = x.date;
+      if (x.src === 'sale') a.lastSale = x.date;
+      if ((x.src === 'sale' || x.src === 'sret') && (!from || x.date >= from)) a.sold = r3(a.sold - x.qty);
+    });
+    var span = from && to ? Math.max(1, Math.round((Date.parse(to) - Date.parse(from)) / 864e5) + 1) : 0;
+    var cut = to ? new Date(Date.parse(to + 'T00:00:00Z') - days * 864e5).toISOString().slice(0, 10) : '';
+    var list = Object.keys(A).map(function (k) {
+      var a = A[k], s = S[k] || {}, since = a.lastMove || a.first;
+      a.close = s.close || 0; a.cost = s.cost || 0; a.value = s.value || 0; a.soldValue = r2(Math.max(0, a.sold) * a.cost);
+      a.idle = to && since ? Math.round((Date.parse(to) - Date.parse(since)) / 864e5) : null;
+      a.cover = span && a.sold > 0 && a.close > 0 ? Math.round(a.close / (a.sold / span)) : null;
+      a.cls = ''; a.rank = 0;
+      return a;
+    });
+    var sold = list.filter(function (a) { return a.sold > 0; }).sort(function (a, b) { return b.soldValue - a.soldValue || b.sold - a.sold; }), nf = Math.max(1, Math.ceil(sold.length / 3));
+    sold.forEach(function (a, i) { a.rank = i + 1; if (i < nf) a.cls = 'fast'; });
+    list.forEach(function (a) {
+      if (a.cls) return;
+      if (a.close > 0 && cut && (a.lastMove || a.first) <= cut) a.cls = 'none';
+      else if (a.close > 0 || a.sold > 0) a.cls = 'slow';
+    });
+    var order = { fast: 0, slow: 1, none: 2 };
+    return list.filter(function (a) { return a.cls; }).sort(function (a, b) { return order[a.cls] - order[b.cls] || (a.rank || 1e9) - (b.rank || 1e9) || b.value - a.value || a.name.localeCompare(b.name); });
+  }
+
   var API = { num: num, r2: r2, r3: r3, key: key, moves: moves, tracked: tracked, summary: summary, ledger: ledger, inHand: inHand, OUTR: OUTR, INR: INR,
     MAIN: MAIN, godowns: godowns, batches: batches, expiring: expiring, expEnd: expEnd, serials: serials, serialsOf: serialsOf, makeCost: makeCost };
+  /* Stock ledger additions */
+  API.itemGroupOf = itemGroupOf; API.groupTree = groupTree; API.VT = VT; API.ledgers = ledgers; API.ledgerTotals = ledgerTotals;
+  /* stock valuation (FIFO or weighted average) */
+  API.valuation = valuation; API.fifoValue = fifoValue;
+  API.godownMatrix = godownMatrix; API.batchLedger = batchLedger; API.movement = movement;
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else G.NSStock = API;
 })(this);
