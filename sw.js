@@ -1,5 +1,5 @@
-const CACHE = 'ns-stock-01c423f35c';
-const SHELL = ["/", "/assets/base.css?v=761f06359b", "/assets/doc.css?v=1271e229c4", "/assets/i18n.js?v=513230c595", "/assets/store.js?v=eb98e624a1", "/assets/core.js?v=b989e14141", "/assets/sbkit.js?v=16017a37df", "/assets/books.js?v=f24672282f", "/assets/stockcore.js?v=23caf6726c", "/assets/sb.css?v=9d9d6e533a", "/assets/stock.js?v=d2846b0c49"];
+const CACHE = 'ns-stock-78c5e65dbe';
+const SHELL = ["/", "/assets/base.css?v=f705ab2da4", "/assets/doc.css?v=1271e229c4", "/assets/i18n.js?v=2d453447a1", "/assets/store.js?v=eb98e624a1", "/assets/core.js?v=b989e14141", "/assets/sbkit.js?v=16017a37df", "/assets/books.js?v=bd520cbe51", "/assets/stockcore.js?v=23caf6726c", "/assets/sb.css?v=715d8e01b0", "/assets/stock.js?v=d2846b0c49"];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(k => Promise.all(k.filter(n => n.startsWith('ns-') && n !== CACHE).map(n => caches.delete(n)))).then(() => self.clients.claim())); });
 self.addEventListener('fetch', e => {
