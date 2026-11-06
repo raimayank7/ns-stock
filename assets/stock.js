@@ -109,7 +109,7 @@
       '<div class="tbl-wrap"><table class="tbl sl-sum"><thead><tr><th class="l">' + esc(t('stk.item')) + '</th><th class="n">' + esc(t('stk.c_open')) + '</th><th class="n">' + esc(t('stk.c_in')) + '</th><th class="n">' + esc(t('stk.c_out')) +
       '</th><th class="n">' + esc(t('stk.c_adj')) + '</th><th class="n">' + esc(t('stk.c_close')) + '</th><th class="n">' + esc(t(isFifo() ? 'fr.c_cost_fifo' : 'stk.c_cost')) + '</th><th class="n">' + esc(t('stk.c_val')) + '</th></tr></thead>' + body +
       '<tfoot><tr><th class="l" colspan="7">' + esc(t(isFifo() ? 'fr.total_fifo' : 'stk.total')) + '</th><th class="n">' + money(list.length === S.items.length ? S.value : shown, false) + '</th></tr></tfoot></table></div>' +
-      '<p class="sb-note">' + esc(t('stk.how')) + (isFifo() ? ' ' + esc(t('fr.how_fifo')) : '') + '</p>' +
+      '<p class="sb-note">' + esc(t('stk.how')) + ' ' + esc(t('stk.how2')) + (isFifo() ? ' ' + esc(t('fr.how_fifo')) : '') + '</p>' +
       '<div class="btns"><button type="button" class="btn" data-print>' + esc(t('sb.print')) + '</button><button type="button" class="btn" data-pdf>' + esc(t('sb.pdf')) + '</button><button type="button" class="btn" data-xl="sum">' + esc(t('sl.excel')) + '</button>' +
       '<a class="btn" href="#ledger">' + esc(t('sl.nav_ledger')) + '</a></div>' +
       '<div class="sb-print">' + sumSheet(list, p, byG) + '</div>';
@@ -136,6 +136,7 @@
     var b = NSB.biz() || {}, a = NSFA.fullCost(NSB.data().doc, NSB.data().item, NSB.bizName(), p.to, b.fa && b.fa.direct || null);
     if (!a.uplift) return '';
     return '<tr><td colspan="7">Add: factory overheads on goods made (full cost, AS 2): ' + money(a.overheads, false) + ' over production of ' + money(a.made, false) + ' since ' + NS.fmtDate(a.from) + '</td><td class="n">' + money(a.uplift, false) + '</td></tr>' +
+      (a.capped ? '<tr><td colspan="7">Not added (stock is never valued above its selling price, AS 2): ' + money(a.capped, false) + '</td><td></td></tr>' : '') +
       '<tr><th colspan="7">Stock value at full cost (used in the final accounts)</th><th class="n">' + money(r2(tot + a.uplift), false) + '</th></tr>';
   }
   function gLabelOf(id, en) {
@@ -146,9 +147,9 @@
   }
 
   /* ---------- ledgers: one item, a group, all items, godown-wise, batch-wise ---------- */
-  var SCOPES = ['item', 'group', 'all', 'godown', 'batch'], VTS = ['sale', 'buy', 'sret', 'pret', 'adj', 'open', 'move', 'make'];
-  var VT_EN = { open: 'Opening stock', buy: 'Purchase', sret: 'Sales return', sale: 'Sale', pret: 'Purchase return', adj: 'Adjustment', move: 'Transfer', make: 'Production' };
-  var R_EN = { damage: 'damaged', own: 'own use', sample: 'free sample', gift: 'gift', lost: 'lost or stolen', expired: 'expired', short: 'short on count', found: 'found', extra: 'extra on count' };
+  var SCOPES = ['item', 'group', 'all', 'godown', 'batch'], VTS = ['sale', 'buy', 'sret', 'pret', 'adj', 'open', 'move', 'make', 'job'];
+  var VT_EN = { open: 'Opening stock', buy: 'Purchase', sret: 'Sales return', sale: 'Sale', pret: 'Purchase return', adj: 'Adjustment', move: 'Transfer', make: 'Production', job: 'Job work' };
+  var R_EN = { damage: 'damaged', own: 'own use', sample: 'free sample', gift: 'gift', lost: 'lost or stolen', jwloss: 'loss and waste at the job worker', expired: 'expired', short: 'short on count', found: 'found', extra: 'extra on count' };
   function vtName(r, en) {
     var n = en ? VT_EN[r.vt] : t('sl.vt_' + r.vt);
     if (r.src === 'use') n = en ? 'Used in production' : t('sl.use');
@@ -211,6 +212,8 @@
     var body = '', sheet = '';
     if (X.matrix) {
       var M = X.matrix, cols = M.gds.map(function (g) { return gdLabel(g); }), colsEn = M.gds.map(function (g) { return gdLabel(g, true); });
+      /* quantities of different units are never added up (423 kg + 200 pcs): the total row shows them only when one unit (round C) */
+      var oneUnit = M.rows.every(function (r) { return String(r.unit || '').toLowerCase() === String((M.rows[0] || {}).unit || '').toLowerCase(); });
       var mt = function (en) {
         return '<table class="tbl sl-gm"><thead><tr><th class="l">' + esc(en ? 'Item' : t('stk.item')) + '</th>' + (en ? colsEn : cols).map(function (c) { return '<th class="n">' + esc(c) + '</th>'; }).join('') +
           '<th class="n">' + esc(en ? 'Total' : t('sl.total')) + '</th><th class="n">' + esc(en ? 'Value (Rs)' : t('stk.c_val')) + '</th></tr></thead><tbody>' +
@@ -218,7 +221,7 @@
             return '<tr' + (r.total < 0 ? ' class="neg"' : '') + '><th scope="row" class="l">' + esc(r.name) + '</th>' + M.keys.map(function (g) { var v = r.q[g] || 0; return '<td class="n' + (v < 0 ? ' cl' : '') + '">' + (v ? qty(v) : '—') + '</td>'; }).join('') +
               '<td class="n cl"><b>' + qty(r.total) + '</b> ' + esc(r.unit) + '</td><td class="n">' + (r.value ? money(r.value, false) : '—') + '</td></tr>';
           }).join('') || '<tr><td colspan="' + (M.keys.length + 3) + '" class="sb-empty">' + esc(en ? 'No stock.' : t('stk.nomatch')) + '</td></tr>') +
-          '</tbody><tfoot><tr><th class="l">' + esc(en ? 'Total' : t('sl.total')) + '</th>' + M.keys.map(function (g) { return '<th class="n">' + qty(M.tot[g] || 0) + '</th>'; }).join('') + '<th></th><th class="n">' +
+          '</tbody><tfoot><tr><th class="l">' + esc(en ? 'Total' : t('sl.total')) + '</th>' + M.keys.map(function (g) { return '<th class="n">' + (oneUnit ? qty(M.tot[g] || 0) : '—') + '</th>'; }).join('') + '<th></th><th class="n">' +
           money(M.rows.reduce(function (a, r) { return r2(a + r.value); }, 0), false) + '</th></tr></tfoot></table>';
       };
       body = '<p class="sb-note">' + esc(t('sl.gmh', { d: NS.fmtDate(p.to) })) + '</p><div class="tbl-wrap">' + mt() + '</div>';

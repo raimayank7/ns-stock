@@ -81,10 +81,30 @@
       if (v && isDirect({ k: a, name: a.slice(4) }, direct)) oh += v;
     });
     V = r2(V); oh = r2(Math.max(0, oh));
-    var f = V > 0 ? oh / V : 0, base = 0;
-    S.summary(docs, items, biz, '', date).items.forEach(function (s) { if (made[s.k] && s.value > 0) base += s.value; });
+    var f = V > 0 ? oh / V : 0, base = 0, up = 0, capped = 0;
+    /* AS 2: inventories at the LOWER of cost and net realisable value. The share of factory expenses added to an item never takes
+       it above what it sells for (its sale rate in the item list, else the last sale rate on a bill) (round C: a pot made at
+       Rs 194 carried Rs 979 while it sells at Rs 450, because the year's whole factory cost sat on the only production entry) */
+    var sell = lastSale(docs, items, biz, date);
+    S.summary(docs, items, biz, '', date).items.forEach(function (s) {
+      if (!made[s.k] || !(s.value > 0)) return;
+      base += s.value;
+      var add = s.value * f, nrv = sell[s.k] && s.close > 0 ? sell[s.k] * s.close : null;
+      if (nrv != null && s.value + add > nrv) { var a2 = Math.max(0, nrv - s.value); capped += add - a2; add = a2; }
+      up += add;
+    });
     base = r2(base);
-    return { from: from, to: date, made: V, overheads: oh, factor: f, base: base, uplift: r2(base * f) };
+    return { from: from, to: date, made: V, overheads: oh, factor: f, base: base, uplift: r2(up), capped: r2(capped), high: f > 1 };
+  }
+  /* the selling price of each item on a day: the rate in the item list, else the latest sale bill's rate */
+  function lastSale(docs, items, biz, date) {
+    var o = {}, at = {}, b = key(biz);
+    (docs || []).forEach(function (d) {
+      if (!/^(invoice|cashmemo)$/.test(d.type || 'invoice') || !bizOk(d, b) || (d.date || '') > date) return;
+      (d.items || []).forEach(function (it) { var k = key(it.desc), r = num(it.rate) * (1 - num(it.disc) / 100); if (k && r > 0 && (!at[k] || d.date >= at[k])) { o[k] = r; at[k] = d.date; } });
+    });
+    (items || []).forEach(function (m) { var k = key(m.desc); if (k && num(m.rate) > 0) o[k] = num(m.rate); });
+    return o;
   }
   function stockOf(sum, want, inv) { var v = 0; sum.items.forEach(function (s) { if (!!want[s.k] !== !!inv) v += s.value; }); return r2(v); }
   /* o: { exps: [{ k: 'exp:…', name, v }] (expenses of the period), direct: [keys] | null, wipOpen, wipClose, purTotal (all purchases,
