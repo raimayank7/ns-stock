@@ -19,7 +19,7 @@
   function show(focus) {
     NSB.navMark(cur === 'item' ? 'home' : cur);
     return Promise.all([NSB.load(), NSStore.meta('groups').catch(function () {}), NSStore.meta('settings').catch(function () {})]).then(function (r) {
-      GM = r[1] || null; SET = r[2] || {};
+      GM = r[1] || null; SET = NS.cfgFor(r[2] || {}, NSB.biz());   /* this business's godowns and settings */
       var pane = $('[data-pane]');
       NSB.modeLine();
       if (!NSB.biz()) { pane.innerHTML = NSB.noBiz(); return; }
@@ -128,7 +128,15 @@
     }).join('') : list.map(function (s) { return row(s); }).join('');
     var tot = list.reduce(function (a, s) { return r2(a + s.value); }, 0);
     return '<div class="stsheet" data-sheet>' + sheetHead('Stock summary' + (SV.g ? ': ' + gLabelOf(SV.g, true) : ''), p) + '<table class="tbl"><thead><tr><th>Item</th><th class="n">Opening</th><th class="n">In</th><th class="n">Out</th><th class="n">Adjusted</th><th class="n">Closing</th><th class="n">Avg cost</th><th class="n">Value (Rs)</th></tr></thead><tbody>' +
-      body + '</tbody><tfoot><tr><th colspan="7">Stock value at ' + valEn() + '</th><th class="n">' + money(tot, false) + '</th></tr></tfoot></table>' + sheetFoot() + '</div>';
+      body + '</tbody><tfoot><tr><th colspan="7">Stock value at ' + valEn() + '</th><th class="n">' + money(tot, false) + '</th></tr>' + as2Rows(p, tot) + '</tfoot></table>' + sheetFoot() + '</div>';
+  }
+  /* goods made here: valued at full cost in the final accounts (AS 2, facore.js fullCost; needs the books on the page) */
+  function as2Rows(p, tot) {
+    if (!window.NSFA || !NSFA.fullCost || q || filt !== 'all' || SV.g) return '';
+    var b = NSB.biz() || {}, a = NSFA.fullCost(NSB.data().doc, NSB.data().item, NSB.bizName(), p.to, b.fa && b.fa.direct || null);
+    if (!a.uplift) return '';
+    return '<tr><td colspan="7">Add: factory overheads on goods made (full cost, AS 2): ' + money(a.overheads, false) + ' over production of ' + money(a.made, false) + ' since ' + NS.fmtDate(a.from) + '</td><td class="n">' + money(a.uplift, false) + '</td></tr>' +
+      '<tr><th colspan="7">Stock value at full cost (used in the final accounts)</th><th class="n">' + money(r2(tot + a.uplift), false) + '</th></tr>';
   }
   function gLabelOf(id, en) {
     if (id === '-') return en ? 'No group' : t('sl.nogroup');
