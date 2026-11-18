@@ -1,4 +1,4 @@
-/* NSFA: more final accounts for the Nivesh Sahayak App (famore.js draws them). Pure functions over NSBooks, NSStock, NSPL.
+/* NSFA: more final accounts for NSBiz (famore.js draws them). Pure functions over NSBooks, NSStock, NSPL.
      mfg      manufacturing account (businesses with production entries): raw material consumed (opening + purchases − closing
               of the items used in production), direct (factory) expenses, ± work in progress (typed), less by-products and
               scrap made = cost of goods manufactured, then the cost of goods sold for the trading part.
