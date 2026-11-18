@@ -223,7 +223,11 @@
     if (a === 'sales-return') return { k: 'sret', name: 'Sales returns refunded' };
     if (a === 'purchases' || a === 'purchase-return') return { k: 'pur', name: 'Purchases' };
     if (a.indexOf('p:') === 0) return v > 0 ? { k: fee ? 'fees' : firm ? 'recvc' : 'recv', name: fee ? 'Fees received' : firm ? 'Received from customers' : 'Received from customers and members' } : { k: 'paid', name: 'Paid to suppliers' };
-    if (/^gst-/.test(a)) return { k: 'gst', name: 'GST' };
+    if (/^gst-|^gstcash-/.test(a)) return { k: 'gst', name: 'GST' };
+    /* F2-5: salary, payroll dues and staff advances get plain heads (they showed raw codes) */
+    if (a === 'sal-payable') return { k: 'salpaid', name: 'Salaries paid' };
+    if (/^(pf|esi|pt)-payable$/.test(a)) return { k: 'pfesi', name: 'PF, ESI and professional tax' };
+    if (a.indexOf('sadv:') === 0) return { k: 'sadv', name: 'Advances to staff' };
     if (/^tds-|^tcs-/.test(a)) return { k: 'tds', name: 'TDS and TCS' };
     if (a === 'round-off') return { k: 'round', name: 'Round off' };
     if (a === 'opening') return { k: 'opening', name: 'Opening balances entered' };
@@ -244,7 +248,13 @@
       if (!m) return;   /* cash deposited in the bank and the like: money stays inside */
       var other = {};
       L.forEach(function (l) { if (!MONEY[l.a]) other[l.a] = r2((other[l.a] || 0) + l.cr - l.dr); });
-      Object.keys(other).forEach(function (a) { var v = other[a]; if (!v) return; var h = rpHead(a, d, v, feeP, firm); add(v > 0 ? rec : pay, h, v > 0 ? v : -v); });
+      /* F2-5: only the money that moved is listed. The heads on the money's side share the cash amount; the other side's non-cash lines
+         (discount allowed, TDS deducted, profit on sale) are netted out instead of showing up as payments or receipts */
+      /* an asset sold: its profit or loss is part of the asset's money, so the sale price and its GST stay whole (F2-19) */
+      var fk = Object.keys(other).filter(function (a) { return a.indexOf('fa:') === 0; })[0];
+      if (fk) ['inc:profit on sale of assets', 'exp:loss on sale of assets'].forEach(function (x) { if (other[x]) { other[fk] = r2(other[fk] + other[x]); delete other[x]; } });
+      var keys = Object.keys(other).filter(function (a) { return m > 0 ? other[a] > 0 : other[a] < 0; }), sum = r2(keys.reduce(function (s, a) { return s + Math.abs(other[a]); }, 0)), done = 0;
+      keys.forEach(function (a, i) { var v = i === keys.length - 1 ? r2(Math.abs(m) - done) : r2(Math.abs(m) * Math.abs(other[a]) / sum); done = r2(done + v); if (!v) return; add(m > 0 ? rec : pay, rpHead(a, d, m > 0 ? 1 : -1, feeP, firm), v); });
     });
     /* a head on both sides (a customer paid and was refunded) keeps both, like a cash book */
     function list(T) { return Object.keys(T).map(function (k) { return T[k]; }).filter(function (x) { return x.v; }).sort(function (a, c) { return c.v - a.v; }); }

@@ -486,7 +486,7 @@
     $$('[data-edit]', pane).forEach(function (b) { b.addEventListener('click', function () { var d = D().filter(function (x) { return x.id === b.getAttribute('data-edit'); })[0]; if (d) form(d.kind, d); }); });
     $$('[data-del]', pane).forEach(function (b) { b.addEventListener('click', function () {
       var d = D().filter(function (x) { return x.id === b.getAttribute('data-del'); })[0];
-      if (d && confirm(t('sb.cdel', { x: NSB.docName(d) + ' ' + (d.no || '') }))) NSStore.del('doc', d.id).then(function () { NS.toast(t('sb.deleted')); show(); });
+      if (d) (NS.ask ? NS.ask(t('sb.cdel', { x: NSB.docName(d) + ' ' + (d.no || '') })) : Promise.resolve(window.confirm(t('sb.cdel', { x: NSB.docName(d) + ' ' + (d.no || '') })))).then(function (ok) { if (ok) return NSStore.del('doc', d.id).then(function () { NS.toast(t('sb.deleted')); show(); }); });
     }); });
     var pr = $('[data-print]', pane), pdf = $('[data-pdf]', pane);
     if (pr) pr.addEventListener('click', NSB.printSheet);
