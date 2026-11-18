@@ -119,7 +119,7 @@
     return '<div class="st-hd"><div><h3>' + esc(b.name || '') + '</h3><div class="soft">' + esc([b.addr, b.city, b.gstin && 'GSTIN ' + b.gstin].filter(Boolean).join(', ')) + '</div></div>' +
       '<div class="r"><b>' + esc(title) + '</b><div class="soft">' + esc(asOn ? 'As on ' + NS.fmtDate(asOn) : p ? 'From ' + NS.fmtDate(p.from) + ' to ' + NS.fmtDate(p.to) : '') + '</div></div></div>';
   }
-  function sheetFoot(extra) { return '<div class="st-ft">' + (extra ? esc(extra) + ' ' : '') + 'Made with Nivesh Sahayak Stock (stock.niveshsahayak.in) on ' + NS.fmtDate(NS.today()) + '</div>'; }
+  function sheetFoot(extra) { return (extra ? '<p class="small">' + esc(extra) + '</p>' : '') + NS.creditLine('st-ft'); }
   function sumSheet(list, p, byG) {
     function row(s, sub) { return '<tr' + (s.low ? ' class="low"' : '') + '><td' + (sub ? ' class="ind"' : '') + '>' + esc(s.name) + '</td><td class="n">' + qty(s.open) + '</td><td class="n">' + qty(s.inq) + '</td><td class="n">' + qty(s.outq) + '</td><td class="n">' + qty(s.adj) + '</td><td class="n">' + qty(s.close) + ' ' + esc(s.unit) + alt2(s) + '</td><td class="n">' + money(s.cost, false) + '</td><td class="n">' + money(s.value, false) + '</td></tr>'; }
     function gRow(label, tot, sub) { return '<tr class="b"><td' + (sub ? ' class="ind"' : '') + '>' + esc(label) + '</td><td class="n">' + qty(tot.open) + '</td><td class="n">' + qty(tot.inq) + '</td><td class="n">' + qty(tot.outq) + '</td><td class="n">' + qty(tot.adj) + '</td><td class="n">' + qty(tot.close) + '</td><td></td><td class="n">' + money(tot.value, false) + '</td></tr>'; }
