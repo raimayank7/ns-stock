@@ -2,11 +2,17 @@
    Stock in and out come by themselves from saved purchase bills, self invoices, sales bills, cash memos, purchase
    returns and credit notes for returned goods (NSStock in stockcore.js). This site adds opening stock, adjustments
    (damage, own use, samples, gifts, lost, expired, found) and physical counts as 'stk' records, low-stock levels on
-   the item masters (field min), and prints the stock summary and each item's register. */
+   the item masters (field min), and prints the stock summary and each item's register.
+   ERP round 1 (inventory): opening stock and adjustments name the godown and, for items kept by batch or serial, the batch,
+   expiry and serials (I-5); the physical count is a "physical stock" record (kind 'phys': the counted quantity becomes the
+   balance on that date, per godown and per batch, I-6); goods back on a delivery challan (kind 'rejin', I-2); Stock settings
+   per business (negative stock allow / warn / block, expired batches warn / block, I-8, I-10: meta settings.stock); lines in a
+   unit that is not one of the item's units are listed under "Wrong unit" (I-3); Reorder status with purchase suggestions that
+   open the purchase-order maker with the lines filled in (I-15: item min, rq, max, lead, supplier; meta 'handoff'). */
 (function () {
   'use strict';
   var $ = NS.$, $$ = NS.$$, esc = NS.esc, num = NS.num, r2 = NS.r2, money = NS.money, qty = NS.qty, K = NSStock, t = NSB.t, key = NSB.key;
-  var SECS = ['home', 'item', 'ledger', 'move', 'entries', 'low'], cur = 'home', arg = '', q = '', filt = 'all';
+  var SECS = ['home', 'item', 'ledger', 'move', 'entries', 'low', 'reorder'], cur = 'home', arg = '', q = '', filt = 'all';
   var GM = null, SET = {};   /* data home meta 'groups' and 'settings' */
   var SV = kept('ns-stock-sv', { g: '', flat: false, shut: {} }), LV = kept('ns-stock-lv', { scope: 'item', k: '', g: '', gd: '*', vt: '' }), MV = kept('ns-stock-mv', { days: 90, f: 'all' });
   var REASONS = ['damage', 'own', 'sample', 'gift', 'lost', 'expired', 'short', 'found', 'extra'];
@@ -18,12 +24,13 @@
   }
   function show(focus) {
     NSB.navMark(cur === 'item' ? 'home' : cur);
-    return Promise.all([NSB.load(), NSStore.meta('groups').catch(function () {}), NSStore.meta('settings').catch(function () {})]).then(function (r) {
+    return Promise.all([NSB.load(), NSStore.meta('groups').catch(function () {}), NSStore.meta('settings').catch(function () {}), NSStore.meta('units').catch(function () {})]).then(function (r) {
       GM = r[1] || null; SET = NS.cfgFor(r[2] || {}, NSB.biz());   /* this business's godowns and settings */
+      if (window.NSMfg && NSMfg.setUnits) NSMfg.setUnits(r[3] || []);   /* I-3: the unit master's conversions */
       var pane = $('[data-pane]');
       NSB.modeLine();
       if (!NSB.biz()) { pane.innerHTML = NSB.noBiz(); return; }
-      pane.innerHTML = NSB.bizBar() + ({ home: homeHtml, item: itemHtml, ledger: ledgerHtml, move: moveHtml, entries: entriesHtml, low: lowHtml })[cur]();
+      pane.innerHTML = NSB.bizBar() + ({ home: homeHtml, item: itemHtml, ledger: ledgerHtml, move: moveHtml, entries: entriesHtml, low: lowHtml, reorder: reorderHtml })[cur]();
       wire(pane);
       if (focus) NSB.focusH2(pane);
     });
@@ -67,19 +74,22 @@
   var SF = ['open', 'inq', 'outq', 'adj', 'close', 'value'];
   function homeHtml() {
     var p = P(), S = sum(p.from, p.to);
-    var list = S.items.filter(function (s) { return (!q || s.name.toLowerCase().indexOf(q.toLowerCase()) >= 0) && (filt !== 'low' || s.low) && (filt !== 'neg' || s.close < 0) && (!SV.g || inGroup(s.m, SV.g)); });
+    var list = S.items.filter(function (s) { return (!q || s.name.toLowerCase().indexOf(q.toLowerCase()) >= 0) && (filt !== 'low' || s.low) && (filt !== 'neg' || s.close < 0) && (filt !== 'unit' || s.bad) && (!SV.g || inGroup(s.m, SV.g)); });
     var head = '<div class="pane-hd"><h2>' + esc(t('stk.sum')) + '</h2><div class="quick"><button type="button" class="btn primary" data-form="adj">+ ' + esc(t('stk.adj')) + '</button>' +
-      '<button type="button" class="btn" data-form="open">+ ' + esc(t('stk.open')) + '</button><button type="button" class="btn" data-form="count">' + esc(t('stk.count')) + '</button></div></div>';
+      '<button type="button" class="btn" data-form="open">+ ' + esc(t('stk.open')) + '</button><button type="button" class="btn" data-form="count">' + esc(t('stk.count')) + '</button>' +
+      '<button type="button" class="btn" data-form="rejin">' + esc(t('sg.rejin')) + '</button><button type="button" class="btn" data-stkset>' + esc(t('sg.set')) + '</button></div></div>';
     var tiles = '<div class="tiles"><div class="tile"><span>' + esc(t('stk.nitems')) + '</span><b>' + S.items.length + '</b></div>' +
       '<div class="tile"><span>' + esc(t('stk.value')) + '</span><b>' + money(S.value) + '</b></div>' +
       '<a class="tile' + (S.low ? ' warn' : '') + '" href="#low"><span>' + esc(t('stk.lowc')) + '</span><b>' + S.low + '</b></a>' +
-      (S.neg ? '<div class="tile neg"><span>' + esc(t('stk.negc')) + '</span><b>' + S.neg + '</b></div>' : '') + '</div>';
+      (S.neg ? '<div class="tile neg"><span>' + esc(t('stk.negc')) + '</span><b>' + S.neg + '</b></div>' : '') +
+      (S.bad ? '<button type="button" class="tile neg" data-filt="unit"><span>' + esc(t('sg.badc')) + '</span><b>' + S.bad + '</b></button>' : '') + '</div>';
     if (!S.items.length) return head + NSB.periodBar('stock') + '<div class="card"><h3>' + esc(t('stk.empty')) + '</h3><p>' + esc(t('stk.emptyp')) + '</p><div class="quick">' +
       '<button type="button" class="btn primary" data-form="open">+ ' + esc(t('stk.open')) + '</button><a class="btn" href="' + NSB.toolUrl('app') + '#buy">' + esc(t('stk.addpb')) + '</a></div></div>';
-    var gopts = gOptions(S.items, SV.g), byG = !!gopts && !SV.flat;
+    var gopts = gOptions(S.items, SV.g), byG = !!gopts && !SV.flat, PROM = K.promised ? K.promised(D(), items(), NSB.bizName(), p.to) : {};   /* ERP round 2: promised on open sales orders */
+    var r3 = function (n) { return Math.round(n * 1000) / 1000; };
     function row(s, sub) {
       return '<tr class="' + (s.low ? 'low' : '') + (s.close < 0 ? ' neg' : '') + (sub ? ' in-sub' : '') + '"><th scope="row" class="l"><a href="#item/' + encodeURIComponent(s.k) + '">' + esc(s.name) + '</a>' +
-        (s.low ? ' <span class="pill warn">' + esc(t('stk.lowp')) + '</span>' : '') + (s.close < 0 ? ' <span class="pill bad">' + esc(t('stk.negp')) + '</span>' : '') + '</th>' +
+        (s.low ? ' <span class="pill warn">' + esc(t('stk.lowp')) + '</span>' : '') + (s.close < 0 ? ' <span class="pill bad">' + esc(t('stk.negp')) + '</span>' : '') + (s.bad ? ' <span class="pill bad" title="' + esc(t('sg.badh')) + '">' + esc(t('sg.badp')) + '</span>' : '') + (PROM[s.k] > 0 ? ' <span class="pill" title="' + esc(t('stk.promh')) + '">' + esc(t('stk.promp', { p: qty(PROM[s.k]), f: qty(r3(s.close - PROM[s.k])) })) + '</span>' : '') + '</th>' +
         '<td class="n">' + qty(s.open) + '</td><td class="n">' + qty(s.inq) + '</td><td class="n">' + qty(s.outq) + '</td><td class="n">' + (s.adj ? qty(s.adj) : '—') + '</td>' +
         '<td class="n cl"><b>' + qty(s.close) + '</b> ' + esc(s.unit) + alt2(s) + '</td><td class="n">' + (s.cost ? money(s.cost, false) : '—') + '</td><td class="n">' + (s.value ? money(s.value, false) : '—') + '</td></tr>';
     }
@@ -102,7 +112,7 @@
     var shown = list.reduce(function (a, s) { return r2(a + s.value); }, 0);
     return head + NSB.periodBar('stock') + tiles +
       '<div class="tools-row"><label class="sr" for="sb-q">' + esc(t('stk.search')) + '</label><input id="sb-q" type="search" data-q value="' + esc(q) + '" placeholder="' + esc(t('stk.search')) + '">' +
-      '<div class="seg" role="group">' + ['all', 'low', 'neg'].map(function (f) { return '<button type="button" class="btn sm" data-filt="' + f + '" aria-pressed="' + (filt === f) + '">' + esc(t('stk.f_' + f)) + '</button>'; }).join('') + '</div>' +
+      '<div class="seg" role="group">' + ['all', 'low', 'neg'].concat(S.bad || filt === 'unit' ? ['unit'] : []).map(function (f) { return '<button type="button" class="btn sm" data-filt="' + f + '" aria-pressed="' + (filt === f) + '">' + esc(f === 'unit' ? t('sg.f_unit') : t('stk.f_' + f)) + '</button>'; }).join('') + '</div>' +
       (gopts ? '<label for="sl-g">' + esc(t('sl.group')) + '<select id="sl-g" data-sv-g><option value="">' + esc(t('sl.allg')) + '</option>' + gopts + '</select></label>' +
         '<button type="button" class="btn sm" data-flat aria-pressed="' + byG + '">' + esc(t('sl.bygroup')) + '</button>' : '') + '</div>' +
       (byG && list.length ? '<div class="btns g-all"><button type="button" class="btn sm" data-tog-all="1">' + esc(t('sl.openall')) + '</button><button type="button" class="btn sm" data-tog-all="0">' + esc(t('sl.closeall')) + '</button></div>' : '') +
@@ -147,22 +157,26 @@
   }
 
   /* ---------- ledgers: one item, a group, all items, godown-wise, batch-wise ---------- */
-  var SCOPES = ['item', 'group', 'all', 'godown', 'batch'], VTS = ['sale', 'buy', 'sret', 'pret', 'adj', 'open', 'move', 'make', 'job'];
-  var VT_EN = { open: 'Opening stock', buy: 'Purchase', sret: 'Sales return', sale: 'Sale', pret: 'Purchase return', adj: 'Adjustment', move: 'Transfer', make: 'Production', job: 'Job work' };
+  var SCOPES = ['item', 'group', 'all', 'godown', 'batch'], VTS = ['sale', 'buy', 'sret', 'pret', 'adj', 'open', 'move', 'make', 'job', 'dn', 'rej', 'phys'];
+  var VT_EN = { open: 'Opening stock', buy: 'Purchase', sret: 'Sales return', sale: 'Sale', pret: 'Purchase return', adj: 'Adjustment', move: 'Transfer', make: 'Production', job: 'Job work', dn: 'Delivery challan', rej: 'Goods back on challan', phys: 'Physical stock' };
   var R_EN = { damage: 'damaged', own: 'own use', sample: 'free sample', gift: 'gift', lost: 'lost or stolen', jwloss: 'loss and waste at the job worker', expired: 'expired', short: 'short on count', found: 'found', extra: 'extra on count' };
   function vtName(r, en) {
     var n = en ? VT_EN[r.vt] : t('sl.vt_' + r.vt);
     if (r.src === 'use') n = en ? 'Used in production' : t('sl.use');
-    if (r.vt === 'adj' && r.reason) n += ' (' + (en ? R_EN[r.reason] : t('stk.r_' + r.reason)) + ')';
+    if ((r.vt === 'adj' || r.vt === 'phys') && r.reason) n += ' (' + (en ? R_EN[r.reason] : t('stk.r_' + r.reason)) + ')';
+    if (r.x && r.x.badUnit) n += en ? ' [unit ' + r.x.unit + ' is not a unit of this item]' : ' ⚠ ' + t('sg.badp');
     return n;
   }
   function types() { if (!LV.vt) return null; var o = {}; o[LV.vt] = 1; return o; }
   /* rows of one ledger on screen (or in the English sheet) */
+  /* inside the App (its frame) a stock line opens its voucher in the App's viewer (R-2 c) */
+  function appView() { try { var P0 = window.parent !== window && window.parent.NSApp; return P0 && P0.viewDoc ? P0.viewDoc : null; } catch (e) { return null; } }
   function ledRows(l, en, noVal) {
     var p = P();
     return '<tr class="op"><td>' + NS.fmtDate(p.from) + '</td><td class="l" colspan="3">' + esc(en ? 'Opening balance' : t('stk.c_open')) + '</td><td></td><td></td><td class="n">' + qty(l.open) + '</td>' + (noVal ? '' : '<td class="n">' + (l.openValue ? money(l.openValue, false) : '—') + '</td>') + '</tr>' +
       l.rows.map(function (r) {
-        return '<tr' + (r.neg ? ' class="neg"' : '') + '><td>' + NS.fmtDate(r.date) + '</td><td class="l">' + esc(vtName(r, en)) + '</td><td class="l">' + esc(r.no) + '</td><td class="l">' + esc(r.party) + '</td>' +
+        var did = !en && appView() && r.x && r.x.d && r.x.d.id ? String(r.x.d.id).split('#')[0] : '';
+        return '<tr' + (r.neg ? ' class="neg"' : '') + (did ? ' data-k="' + esc(did) + '"' : '') + '><td>' + NS.fmtDate(r.date) + '</td><td class="l">' + esc(vtName(r, en)) + '</td><td class="l">' + (did ? '<a href="#" data-sldoc="' + esc(did) + '">' + esc(r.no || '—') + '</a>' : esc(r.no)) + '</td><td class="l">' + esc(r.party) + '</td>' +
           '<td class="n">' + (r.inq ? qty(r.inq) : '') + '</td><td class="n">' + (r.outq ? qty(r.outq) : '') + '</td><td class="n cl">' + qty(r.bal) + (r.neg && !en ? ' <span class="pill bad">' + esc(t('stk.negp')) + '</span>' : '') + '</td>' +
           (noVal ? '' : '<td class="n">' + (r.value ? money(r.value, false) : '—') + '</td>') + '</tr>';
       }).join('');
@@ -218,7 +232,7 @@
         return '<table class="tbl sl-gm"><thead><tr><th class="l">' + esc(en ? 'Item' : t('stk.item')) + '</th>' + (en ? colsEn : cols).map(function (c) { return '<th class="n">' + esc(c) + '</th>'; }).join('') +
           '<th class="n">' + esc(en ? 'Total' : t('sl.total')) + '</th><th class="n">' + esc(en ? 'Value (Rs)' : t('stk.c_val')) + '</th></tr></thead><tbody>' +
           (M.rows.map(function (r) {
-            return '<tr' + (r.total < 0 ? ' class="neg"' : '') + '><th scope="row" class="l">' + esc(r.name) + '</th>' + M.keys.map(function (g) { var v = r.q[g] || 0; return '<td class="n' + (v < 0 ? ' cl' : '') + '">' + (v ? qty(v) : '—') + '</td>'; }).join('') +
+            return '<tr' + (r.total < 0 ? ' class="neg"' : '') + '><th scope="row" class="l">' + esc(r.name) + '</th>' + M.keys.map(function (g) { var v = r.q[g] || 0; return '<td class="n' + (v < 0 ? ' cl neg' : '') + '"' + (v < 0 ? ' title="' + esc(t('sl.gneg')) + '"' : '') + '>' + (v ? qty(v) + (v < 0 && !en ? ' ⚠' : '') : '—') + '</td>'; }).join('') +
               '<td class="n cl"><b>' + qty(r.total) + '</b> ' + esc(r.unit) + '</td><td class="n">' + (r.value ? money(r.value, false) : '—') + '</td></tr>';
           }).join('') || '<tr><td colspan="' + (M.keys.length + 3) + '" class="sb-empty">' + esc(en ? 'No stock.' : t('stk.nomatch')) + '</td></tr>') +
           '</tbody><tfoot><tr><th class="l">' + esc(en ? 'Total' : t('sl.total')) + '</th>' + M.keys.map(function (g) { return '<th class="n">' + (oneUnit ? qty(M.tot[g] || 0) : '—') + '</th>'; }).join('') + '<th></th><th class="n">' +
@@ -369,7 +383,7 @@
   }
   function lowHtml() {
     var S = sum('', NS.today()), low = S.items.filter(function (s) { return s.low; }), unset = S.items.filter(function (s) { return !s.min; }).length;
-    return '<div class="pane-hd"><h2>' + esc(t('stk.low')) + '</h2><a class="btn primary" href="' + NSB.toolUrl('purchase-order') + '">' + esc(t('stk.makepo')) + '</a></div><p class="sb-note">' + esc(t('stk.lowh')) + '</p>' +
+    return '<div class="pane-hd"><h2>' + esc(t('stk.low')) + '</h2><a class="btn primary" href="#reorder">' + esc(t('sg.ro_open')) + '</a></div><p class="sb-note">' + esc(t('stk.lowh')) + '</p>' +
       (low.length ? '<ul class="rows">' + low.map(function (s) {
         return '<li><a href="#item/' + encodeURIComponent(s.k) + '"><b>' + esc(s.name) + '</b><span class="soft">' + esc(t('stk.lowline', { a: qty(s.close) + ' ' + s.unit, b: qty(s.min) })) + '</span></a><div class="acts"><button type="button" class="btn sm" data-min="' + esc(s.k) + '">' + esc(t('stk.setmin')) + '</button></div></li>';
       }).join('') + '</ul>' : '<p class="soft">' + esc(t('stk.nolow')) + '</p>') +
@@ -391,22 +405,29 @@
       (kind === 'open' ? '<label class="lc" for="' + id('r') + '"><span>' + esc(t('stk.cost')) + '</span><input id="' + id('r') + '" data-k="rate" inputmode="decimal" value="' + esc(l.rate != null ? l.rate : '') + '"></label>'
         : '<label class="lc" for="' + id('r') + '"><span>' + esc(t('stk.reason')) + '</span><select id="' + id('r') + '" data-k="reason">' + REASONS.map(function (r) { return '<option value="' + r + '"' + (l.reason === r ? ' selected' : '') + '>' + esc(t('stk.r_' + r)) + '</option>'; }).join('') + '</select></label>') +
       '<label class="lc" for="' + id('u') + '"><span>' + esc(t('stk.unit')) + '</span><input id="' + id('u') + '" data-k="unit" value="' + esc(l.unit || '') + '"></label>' +
+      (anyTrack() ? '<label class="lc" for="' + id('b') + '"><span>' + esc(t('b2.batch')) + '</span><input id="' + id('b') + '" data-k="batch" dir="ltr" autocomplete="off" value="' + esc(l.batch || '') + '"></label>' +
+        '<label class="lc" for="' + id('e') + '"><span>' + esc(t('b2.expm2')) + '</span><input id="' + id('e') + '" data-k="exp" type="month" dir="ltr" value="' + esc(l.exp || '') + '"></label>' +
+        '<label class="lc" for="' + id('s') + '"><span>' + esc(t('b2.serials')) + '</span><input id="' + id('s') + '" data-k="serial" dir="ltr" autocomplete="off" value="' + esc(l.serial || '') + '"></label>' : '') +
       '<button type="button" class="btn sm rm" data-rm aria-label="' + esc(t('sb.rmline')) + '">✕</button></div>';
   }
+  /* I-5: batch, expiry and serial boxes on opening stock and adjustments when any item is kept by batch or serial */
+  function anyTrack() { return items().some(function (m) { return m.track && m.track !== 'none'; }) || D().some(function (d) { return d.type === 'stk' && (d.lines || []).some(function (l) { return l.batch || l.serial; }); }); }
+  function gdSelect(cur0, id0) { var g = godownNames(); if (!g.length) return ''; return '<div class="f"><label for="' + (id0 || 'f-gd') + '">' + esc(t('sl.godown')) + '</label><select id="' + (id0 || 'f-gd') + '"><option value="">' + esc(t('b2.main')) + '</option>' + g.map(function (x) { return '<option' + (x === cur0 ? ' selected' : '') + '>' + esc(x) + '</option>'; }).join('') + '</select></div>'; }
   function nextNo(kind) {
-    var fy = NS.fy(NS.today()), pre = (kind === 'open' ? 'OS/' : 'SA/') + fy.slice(2) + '/';
+    var fy = NS.fy(NS.today()), pre = ({ open: 'OS/', phys: 'PS/', rejin: 'GR/' }[kind] || 'SA/') + fy.slice(2) + '/';
     var n = D().filter(function (d) { return d.type === 'stk' && d.kind === kind && String(d.no || '').indexOf(pre) === 0; }).length;
     return pre + String(n + 1).padStart(3, '0');
   }
   function form(kind, rec, forKey) {
-    if (kind === 'count') return countForm();
+    if (kind === 'count' || kind === 'phys') return countForm(rec);
+    if (kind === 'rejin') return rejinForm(rec);
     var r = rec || { type: 'stk', kind: kind, date: kind === 'open' ? NSB.fyStart(NS.today()) : NS.today(), lines: [{ desc: forKey ? sum('', '').items.filter(function (s) { return s.k === forKey; })[0].name : '', reason: 'damage' }] };
     var lines = (r.lines || []).map(function (l) { return Object.assign({}, l); });
     var f = NSB.dialog(t(kind === 'open' ? 'stk.open' : 'stk.adj'),
       '<datalist id="sb-items">' + itemNames().map(function (n) { return '<option value="' + esc(n) + '">'; }).join('') + '</datalist>' +
       '<p class="hint">' + esc(t(kind === 'open' ? 'stk.openh' : 'stk.adjh')) + '</p>' +
       '<div class="fg"><div class="f"><label for="f-date">' + esc(t('sb.date')) + '</label><input type="date" id="f-date" value="' + esc(r.date) + '" required></div>' +
-      '<div class="f"><label for="f-no">' + esc(t('stk.no')) + '</label><input id="f-no" value="' + esc(r.no || nextNo(kind)) + '"></div>' +
+      '<div class="f"><label for="f-no">' + esc(t('stk.no')) + '</label><input id="f-no" value="' + esc(r.no || nextNo(kind)) + '"></div>' + gdSelect(r.gd) +
       '<div class="f wide"><label for="f-note">' + esc(t('sb.note')) + '</label><input id="f-note" value="' + esc(r.note || '') + '" dir="auto"></div></div>' +
       '<fieldset><legend>' + esc(t('stk.items')) + '</legend><div data-lines></div><button type="button" class="btn sm" data-add>' + esc(t('sb.addline')) + '</button></fieldset>' +
       '<div class="dlg-foot"><button type="submit" class="btn primary">' + esc(t('sb.save')) + '</button><button type="button" class="btn" data-cancel>' + esc(t('sb.cancel')) + '</button></div>');
@@ -423,45 +444,164 @@
       e.preventDefault(); read();
       var good = lines.filter(function (l) { return String(l.desc || '').trim() && num(l.qty); });
       if (!$('#f-date', f).value || !good.length) { NS.toast(t('stk.need'), 'bad'); return; }
-      var d = Object.assign(rec || { type: 'stk', kind: kind, app: 1 }, { date: $('#f-date', f).value, no: $('#f-no', f).value.trim(), note: $('#f-note', f).value.trim(), seller: rec ? rec.seller : NSB.sellerCopy(),
+      var gsel = $('#f-gd', f), d = Object.assign(rec || { type: 'stk', kind: kind, app: 1 }, { date: $('#f-date', f).value, no: $('#f-no', f).value.trim(), note: $('#f-note', f).value.trim(), seller: rec ? rec.seller : NSB.sellerCopy(),
         lines: good.map(function (l) {
           var o = { desc: String(l.desc).trim(), unit: String(l.unit || '').trim(), qty: Math.abs(num(l.qty)) };
+          ['batch', 'exp', 'serial'].forEach(function (k) { var v = String(l[k] || '').trim(); if (v) o[k] = v; });
           if (kind === 'open') o.rate = num(l.rate); else { o.reason = l.reason; if (K.OUTR[l.reason]) o.qty = -o.qty; }
           return o;
         }) });
-      saveMasters(d.lines).then(function () { return NSStore.put('doc', d); }).then(done);
+      if (gsel) { if (gsel.value) d.gd = gsel.value; else delete d.gd; }
+      var bu = K.badUnits ? K.badUnits(d, items()) : [];
+      if (bu.length) { NS.toast(t('sg.unit', { n: bu[0].name, u: bu[0].unit, b: bu[0].base }), 'bad'); return; }
+      var AV = kind === 'adj' && K.adjValue ? K.adjValue(D(), items(), NSB.bizName(), d) : null;   /* ERP round 2, I-7: value at cost and GST credit to reverse, kept on the record */
+      if (AV) { delete d.val; d.lines.forEach(function (o) { delete o.cost; delete o.value; delete o.itcRev; }); AV.lines.forEach(function (x) { var o = d.lines[x.i]; o.cost = x.cost; o.value = x.value; if (x.itc.igst + x.itc.cgst + x.itc.sgst) o.itcRev = x.itc; }); if (AV.value) d.val = AV.value; }
+      saveMasters(d.lines).then(function () { return NSStore.put('doc', d); }).then(function (x) { if (AV && AV.value) NS.toast(t('or.adjval', { v: NS.money ? NS.money(AV.value) : AV.value, g: NS.money ? NS.money(AV.itc.igst + AV.itc.cgst + AV.itc.sgst) : AV.itc.igst + AV.itc.cgst + AV.itc.sgst })); return x; }).then(done);
     };
   }
-  /* physical count: every item with what the books say; the differences are saved as one adjustment */
-  function countForm() {
-    var dt = NS.today(), hand = K.inHand(D(), items(), NSB.bizName(), dt), S = sum('', dt).items;
-    var f = NSB.dialog(t('stk.count'), '<p class="hint">' + esc(t('stk.counth')) + '</p>' +
-      '<div class="fg"><div class="f"><label for="f-date">' + esc(t('sb.date')) + '</label><input type="date" id="f-date" value="' + dt + '"></div></div>' +
-      '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>' + esc(t('stk.item')) + '</th><th class="n">' + esc(t('stk.book')) + '</th><th class="n">' + esc(t('stk.counted')) + '</th></tr></thead><tbody>' +
-      S.map(function (s, i) { return '<tr><th scope="row"><label for="c' + i + '">' + esc(s.name) + '</label></th><td class="n">' + qty(hand[s.k] || 0) + ' ' + esc(s.unit) + '</td><td class="n"><input id="c' + i + '" data-c="' + esc(s.k) + '" inputmode="decimal" style="width:110px"></td></tr>'; }).join('') +
-      '</tbody></table></div><div class="dlg-foot"><button type="submit" class="btn primary">' + esc(t('stk.savecount')) + '</button><button type="button" class="btn" data-cancel>' + esc(t('sb.cancel')) + '</button></div>');
+  /* physical stock (I-5, I-6): pick the godown, type what is on the shelf; items kept by batch show one row per batch.
+     Saved as kind 'phys' with the counted quantities: the register makes the difference itself, so a bill dated before the
+     count and entered later does not undo it. An item left empty is not counted. */
+  function countForm(rec) {
+    var dt = rec ? rec.date : NS.today(), gd = rec ? rec.gd || '' : '', typed = {};
+    (rec && rec.lines || []).forEach(function (l) { typed[key(l.desc) + '|' + key(l.batch)] = l.qty; });
+    function rows(date, g) {
+      var gk = g || K.MAIN, S = K.summary(D(), items(), NSB.bizName(), '', date, gk).items, out = [];
+      var all = sum('', date).items;   /* every item the register follows, also those with none in this godown */
+      all.forEach(function (s0) {
+        var m = s0.m || {}, here = S.filter(function (x) { return x.k === s0.k; })[0], book = here ? here.close : 0;
+        var B = (m.track === 'batch' || m.track === 'both') ? K.batches(D(), items(), NSB.bizName(), s0.k, date, gk).filter(function (b) { return b.batch; }) : [];
+        if (B.length) B.forEach(function (b) { out.push({ k: s0.k, name: s0.name, unit: s0.unit, batch: b.batch, exp: b.exp, book: b.qty }); });
+        else out.push({ k: s0.k, name: s0.name, unit: s0.unit, batch: '', book: book });
+      });
+      return out;
+    }
+    var f = NSB.dialog(t('stk.count'), '<p class="hint">' + esc(t('sg.physh')) + '</p>' +
+      '<div class="fg"><div class="f"><label for="f-date">' + esc(t('sb.date')) + '</label><input type="date" id="f-date" value="' + esc(dt) + '"></div>' + gdSelect(gd) +
+      '<div class="f"><label for="f-no">' + esc(t('stk.no')) + '</label><input id="f-no" value="' + esc(rec && rec.no || nextNo('phys')) + '"></div></div>' +
+      '<div class="tbl-wrap" data-ct></div><div class="dlg-foot"><button type="submit" class="btn primary">' + esc(t('stk.savecount')) + '</button><button type="button" class="btn" data-cancel>' + esc(t('sb.cancel')) + '</button></div>');
+    var R = [];
+    function draw() {
+      var date = $('#f-date', f).value || dt, g = $('#f-gd', f) ? $('#f-gd', f).value : '';
+      $$('[data-c]', f).forEach(function (inp) { if (inp.value.trim() !== '') typed[inp.getAttribute('data-c')] = inp.value; });
+      R = rows(date, g);
+      $('[data-ct]', f).innerHTML = '<table class="tbl"><thead><tr><th>' + esc(t('stk.item')) + '</th><th>' + esc(t('b2.batch')) + '</th><th class="n">' + esc(t('stk.book')) + '</th><th class="n">' + esc(t('stk.counted')) + '</th></tr></thead><tbody>' +
+        R.map(function (r, i) { var id = r.k + '|' + key(r.batch); return '<tr><th scope="row"><label for="c' + i + '">' + esc(r.name) + '</label></th><td dir="ltr">' + esc(r.batch ? r.batch + (r.exp ? ' (' + r.exp.slice(5) + '/' + r.exp.slice(0, 4) + ')' : '') : '—') + '</td><td class="n">' + qty(r.book) + ' ' + esc(r.unit) + '</td>' +
+          '<td class="n"><input id="c' + i + '" data-c="' + esc(id) + '" data-i="' + i + '" inputmode="decimal" style="width:110px" value="' + esc(typed[id] != null ? typed[id] : '') + '"></td></tr>'; }).join('') + '</tbody></table>';
+    }
+    draw();
+    $('#f-date', f).addEventListener('change', draw);
+    if ($('#f-gd', f)) $('#f-gd', f).addEventListener('change', draw);
     $('[data-cancel]', f).addEventListener('click', NSB.closeDialog);
     f.onsubmit = function (e) {
       e.preventDefault();
-      var date = $('#f-date', f).value || dt, h = K.inHand(D(), items(), NSB.bizName(), date), lines = [];
+      var date = $('#f-date', f).value || dt, g = $('#f-gd', f) ? $('#f-gd', f).value : '', lines = [];
       $$('[data-c]', f).forEach(function (inp) {
         if (inp.value.trim() === '') return;
-        var k = inp.getAttribute('data-c'), s = S.filter(function (x) { return x.k === k; })[0], diff = K.r3(num(inp.value) - (h[k] || 0));
-        if (diff) lines.push({ desc: s.name, unit: s.unit, qty: diff, reason: diff < 0 ? 'short' : 'extra' });
+        var r = R[+inp.getAttribute('data-i')]; if (!r) return;
+        var o = { desc: r.name, unit: r.unit, qty: K.r3(num(inp.value)) }; if (r.batch) { o.batch = r.batch; if (r.exp) o.exp = r.exp; }
+        lines.push(o);
       });
-      if (!lines.length) { NS.toast(t('stk.nodiff')); NSB.closeDialog(); return; }
-      NSStore.put('doc', { type: 'stk', kind: 'adj', app: 1, date: date, no: nextNo('adj'), note: t('stk.countnote'), seller: NSB.sellerCopy(), lines: lines }).then(done);
+      if (!lines.length) { NS.toast(t('stk.need')); return; }
+      var d = Object.assign(rec || { type: 'stk', kind: 'phys', app: 1 }, { kind: 'phys', date: date, no: $('#f-no', f).value.trim() || nextNo('phys'), note: t('stk.countnote'), seller: rec ? rec.seller : NSB.sellerCopy(), lines: lines });
+      if (g) d.gd = g; else delete d.gd;
+      NSStore.put('doc', d).then(done);
     };
+  }
+  /* goods back on a delivery challan (I-2): the challan's lines, less what came back before; saved as kind 'rejin' */
+  function rejinForm(rec) {
+    var CH = D().filter(function (d) { return d.type === 'challan' && K.stockRole(d) === 'dn' && d.status !== 'dret'; }).sort(function (a, b) { return (b.date || '').localeCompare(a.date || ''); });
+    if (rec) { var own = D().filter(function (d) { return d.id === rec.ref; })[0]; if (own && CH.indexOf(own) < 0) CH.unshift(own); }
+    if (!CH.length) { NS.toast(t('sg.nochallan')); return; }
+    function back(ch) { var o = {}; D().forEach(function (d) { if (d.type === 'stk' && d.kind === 'rejin' && d.ref === ch.id && (!rec || d.id !== rec.id)) (d.lines || []).forEach(function (l) { o[key(l.desc)] = (o[key(l.desc)] || 0) + Math.abs(num(l.qty)); }); }); return o; }
+    var f = NSB.dialog(t('sg.rejin'), '<p class="hint">' + esc(t('sg.rejinh')) + '</p><div class="fg"><div class="f wide"><label for="f-ch">' + esc(t('sg.challan')) + '</label><select id="f-ch">' +
+      CH.map(function (d) { return '<option value="' + esc(d.id) + '"' + (rec && rec.ref === d.id ? ' selected' : '') + '>' + esc((d.no || '') + ' · ' + NS.fmtDate(d.date) + ' · ' + (d.buyer && d.buyer.name || '')) + '</option>'; }).join('') + '</select></div>' +
+      '<div class="f"><label for="f-date">' + esc(t('sb.date')) + '</label><input type="date" id="f-date" value="' + esc(rec ? rec.date : NS.today()) + '"></div><div class="f"><label for="f-no">' + esc(t('stk.no')) + '</label><input id="f-no" value="' + esc(rec && rec.no || nextNo('rejin')) + '"></div></div>' +
+      '<div class="tbl-wrap" data-rl></div><div class="dlg-foot"><button type="submit" class="btn primary">' + esc(t('sb.save')) + '</button><button type="button" class="btn" data-cancel>' + esc(t('sb.cancel')) + '</button></div>');
+    var cur0 = null;
+    function draw() {
+      cur0 = CH.filter(function (d) { return d.id === $('#f-ch', f).value; })[0]; var B0 = back(cur0), had = {};
+      (rec && rec.ref === cur0.id ? rec.lines : []).forEach(function (l) { had[key(l.desc)] = Math.abs(num(l.qty)); });
+      $('[data-rl]', f).innerHTML = '<table class="tbl"><thead><tr><th>' + esc(t('stk.item')) + '</th><th class="n">' + esc(t('sg.sent')) + '</th><th class="n">' + esc(t('sg.backq')) + '</th></tr></thead><tbody>' +
+        (cur0.items || []).filter(function (it) { return String(it.desc || '').trim(); }).map(function (it, i) {
+          var sent = it.qty === '' || it.qty == null ? 1 : num(it.qty), left = K.r3(sent - (B0[key(it.desc)] || 0));
+          return '<tr><th scope="row"><label for="r' + i + '">' + esc(it.desc) + '</label></th><td class="n">' + qty(sent) + ' ' + esc(it.unit || '') + '</td><td class="n"><input id="r' + i + '" data-r="' + i + '" inputmode="decimal" style="width:110px" value="' + esc(had[key(it.desc)] != null ? had[key(it.desc)] : left > 0 ? left : '') + '"></td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+    draw(); $('#f-ch', f).addEventListener('change', draw);
+    $('[data-cancel]', f).addEventListener('click', NSB.closeDialog);
+    f.onsubmit = function (e) {
+      e.preventDefault();
+      var L = (cur0.items || []).filter(function (it) { return String(it.desc || '').trim(); }), lines = [];
+      $$('[data-r]', f).forEach(function (inp) { var it = L[+inp.getAttribute('data-r')], v = num(inp.value); if (it && v > 0) { var o = { desc: it.desc, unit: it.unit || '', qty: v }; if (it.batch) { o.batch = it.batch; o.exp = it.exp || ''; } if (it.serial) o.serial = it.serial; lines.push(o); } });
+      if (!lines.length) { NS.toast(t('stk.need'), 'bad'); return; }
+      var d = Object.assign(rec || { type: 'stk', kind: 'rejin', app: 1 }, { date: $('#f-date', f).value || NS.today(), no: $('#f-no', f).value.trim(), ref: cur0.id, refNo: cur0.no || '', note: t('sg.rejnote', { no: cur0.no || '' }), seller: rec ? rec.seller : NSB.sellerCopy(), lines: lines });
+      if (cur0.gd) d.gd = cur0.gd; else delete d.gd;
+      NSStore.put('doc', d).then(done);
+    };
+  }
+  /* Stock settings of this business (I-8, I-10): meta settings.stock through NS.cfgEdit */
+  function setForm() {
+    var c = Object.assign({ neg: 'allow', expired: '' }, SET.stock || {});
+    function sel(id, v, opts) { return '<select id="' + id + '">' + opts.map(function (o) { return '<option value="' + o[0] + '"' + (o[0] === v ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') + '</select>'; }
+    var f = NSB.dialog(t('sg.set'), '<div class="fg"><div class="f wide"><label for="f-neg">' + esc(t('sg.neg')) + '</label>' + sel('f-neg', c.neg, [['allow', t('sg.n_allow')], ['warn', t('sg.n_warn')], ['block', t('sg.n_block')]]) + '</div>' +
+      '<div class="f wide"><label for="f-exp">' + esc(t('sg.expset')) + '</label>' + sel('f-exp', c.expired, [['', t('sg.e_def')], ['warn', t('sg.e_warn')], ['block', t('sg.e_block')]]) + '</div></div><p class="hint">' + esc(t('sg.seth')) + '</p>' +
+      '<div class="dlg-foot"><button type="submit" class="btn primary">' + esc(t('sb.save')) + '</button><button type="button" class="btn" data-cancel>' + esc(t('sb.cancel')) + '</button></div>');
+    $('[data-cancel]', f).addEventListener('click', NSB.closeDialog);
+    f.onsubmit = function (e) {
+      e.preventDefault();
+      var v = { neg: $('#f-neg', f).value, expired: $('#f-exp', f).value }; if (!v.expired) delete v.expired;
+      NS.cfgEdit(NSB.biz(), function (V) { V.stock = Object.assign({}, V.stock || {}, v); if (!v.expired) delete V.stock.expired; }).then(done);
+    };
+  }
+
+  /* ---------- reorder status (I-15) ---------- */
+  function reorderHtml() {
+    var R = K.reorder(D(), items(), NSB.bizName(), NS.today()), due = R.filter(function (r) { return r.due; }), ok = R.filter(function (r) { return !r.due; });
+    var head = '<div class="pane-hd"><h2>' + esc(t('sg.ro')) + '</h2></div><p class="sb-note">' + esc(t('sg.roh')) + '</p>';
+    if (!R.length) return head + '<p class="soft">' + esc(t('sg.ronone')) + '</p>';
+    var bySup = {}, order = [];
+    due.forEach(function (r) { var s0 = r.supplier || ''; if (!bySup[s0]) { bySup[s0] = []; order.push(s0); } bySup[s0].push(r); });
+    function tbl(list, en, sug) {
+      var c = en ? ['Item', 'In hand', 'Ordered', 'Booked', 'Projected', 'Reorder level', 'Suggested order'] : [t('stk.item'), t('sg.c_have'), t('sg.c_po'), t('sg.c_so'), t('sg.c_proj'), t('stk.minl'), t('sg.c_sug')];
+      if (!sug) c.pop();
+      return '<table class="tbl"><thead><tr>' + c.map(function (h, i) { return '<th class="' + (i ? 'n' : 'l') + '">' + esc(h) + '</th>'; }).join('') + (en ? '' : '<th></th>') + '</tr></thead><tbody>' + list.map(function (r) {
+        return '<tr><th scope="row" class="l">' + (en ? esc(r.name) : '<a href="#item/' + encodeURIComponent(r.k) + '">' + esc(r.name) + '</a>') + '</th><td class="n">' + qty(r.have) + ' ' + esc(r.unit) + '</td><td class="n">' + (r.po ? qty(r.po) : '—') + '</td><td class="n">' + (r.so ? qty(r.so) : '—') + '</td>' +
+          '<td class="n' + (r.projected < 0 ? ' cl neg' : '') + '">' + qty(r.projected) + '</td><td class="n">' + (r.min ? qty(r.min) : '—') + '</td>' + (sug ? '<td class="n"><b>' + qty(r.suggest) + '</b> ' + esc(r.unit) + '</td>' : '') +
+          (en ? '' : '<td><button type="button" class="btn sm" data-ro="' + esc(r.k) + '">' + esc(t('sg.roset')) + '</button></td>') + '</tr>';
+      }).join('') + '</tbody></table>';
+    }
+    var body = (due.length ? order.map(function (sp) {
+      return '<h3 class="sl-h">' + esc(sp || t('sg.nosup')) + '</h3><div class="tbl-wrap">' + tbl(bySup[sp], false, true) + '</div><div class="btns"><button type="button" class="btn primary" data-mkpo="' + esc(sp) + '">' + esc(t('sg.mkpo')) + '</button></div>';
+    }).join('') : '<p class="soft">' + esc(t('sg.rodue0')) + '</p>') +
+      (ok.length ? '<h3 class="sl-h">' + esc(t('sg.rook')) + '</h3><div class="tbl-wrap">' + tbl(ok, false, false) + '</div>' : '');
+    return head + '<div class="tiles"><div class="tile' + (due.length ? ' warn' : '') + '"><span>' + esc(t('sg.rodue')) + '</span><b>' + due.length + '</b></div><div class="tile"><span>' + esc(t('sg.rowatch')) + '</span><b>' + R.length + '</b></div></div>' + body +
+      '<div class="btns"><button type="button" class="btn" data-print>' + esc(t('sb.print')) + '</button></div><div class="sb-print"><div class="stsheet" data-sheet>' + sheetHead('Reorder status', null, NS.today()) +
+      order.map(function (sp) { return '<h4>' + esc(sp || 'No supplier set') + '</h4>' + tbl(bySup[sp], true, true); }).join('') + sheetFoot('Projected = in hand + ordered from suppliers - booked by customers (open orders).') + '</div></div>';
+  }
+  /* the purchase order maker opens with this supplier and the suggested lines (meta 'handoff', read once by docs.js ?hand=1) */
+  function makePo(sp) {
+    var R = K.reorder(D(), items(), NSB.bizName(), NS.today()).filter(function (r) { return r.due && (r.supplier || '') === sp; });
+    if (!R.length) return;
+    var P = (NSB.data().party || []).filter(function (x) { return key(x.name) === key(sp); })[0] || {};
+    var h = { type: 'po', t: Date.now(), seller: NSB.sellerCopy(), buyer: sp ? { name: P.name || sp, addr: P.addr || '', city: P.city || '', pin: P.pin || '', state: P.state || '', gstin: P.gstin || '', phone: P.phone || '' } : null,
+      items: R.map(function (r) { var m = r.m || {}; return { desc: r.name, qty: r.suggest, unit: r.unit, rate: m.prate != null ? m.prate : '', hsn: m.hsn || '', gst: m.gst }; }) };
+    NSStore.meta('handoff', h).then(function () { location.href = NSB.toolUrl('purchase-order') + '?hand=1'; });
   }
   function minForm(k) {
     var s = sum('', '').items.filter(function (x) { return x.k === k; })[0]; if (!s) return;
-    var f = NSB.dialog(t('stk.setmin') + ': ' + s.name, '<p class="hint">' + esc(t('stk.minh')) + '</p><div class="fg"><div class="f"><label for="f-min">' + esc(t('stk.minl')) + ' (' + esc(s.unit || '') + ')</label><input id="f-min" inputmode="decimal" value="' + esc(s.min || '') + '"></div></div>' +
+    var m0 = s.m || {}, sups = (NSB.data().party || []).filter(function (x) { return x.role === 'supplier' || x.role === 'both'; }).map(function (x) { return x.name; });
+    var f = NSB.dialog(t('stk.setmin') + ': ' + s.name, '<p class="hint">' + esc(t('stk.minh')) + ' ' + esc(t('sg.roseth')) + '</p><div class="fg"><div class="f"><label for="f-min">' + esc(t('stk.minl')) + ' (' + esc(s.unit || '') + ')</label><input id="f-min" inputmode="decimal" value="' + esc(s.min || '') + '"></div>' +
+      '<div class="f"><label for="f-rq">' + esc(t('sg.rq')) + '</label><input id="f-rq" inputmode="decimal" value="' + esc(m0.rq || '') + '"></div><div class="f"><label for="f-max">' + esc(t('sg.max')) + '</label><input id="f-max" inputmode="decimal" value="' + esc(m0.max || '') + '"></div>' +
+      '<div class="f"><label for="f-lead">' + esc(t('sg.lead')) + '</label><input id="f-lead" inputmode="numeric" value="' + esc(m0.lead || '') + '"></div><div class="f wide"><label for="f-sup">' + esc(t('sg.sup')) + '</label><input id="f-sup" list="f-sups" dir="auto" value="' + esc(m0.supplier || '') + '"><datalist id="f-sups">' + sups.map(function (n) { return '<option value="' + esc(n) + '">'; }).join('') + '</datalist></div></div>' +
       '<div class="dlg-foot"><button type="submit" class="btn primary">' + esc(t('sb.save')) + '</button><button type="button" class="btn" data-cancel>' + esc(t('sb.cancel')) + '</button></div>');
     $('[data-cancel]', f).addEventListener('click', NSB.closeDialog);
     f.onsubmit = function (e) {
       e.preventDefault();
       var m = items().filter(function (x) { return key(x.desc) === k; })[0] || { desc: s.name, kind: 'goods', unit: s.unit, rate: '', gst: '' };
       m.min = num($('#f-min', f).value);
+      ['rq', 'max', 'lead'].forEach(function (k) { var v = num($('#f-' + k, f).value); if (v > 0) m[k] = v; else delete m[k]; });
+      var sp = $('#f-sup', f).value.trim(); if (sp) m.supplier = sp; else delete m.supplier;
       NSStore.put('item', m).then(done);
     };
   }
@@ -478,11 +618,17 @@
 
   function wire(pane) {
     NSB.wireBiz(pane, show); NSB.wirePeriod(pane, 'stock', show);
+    $$('[data-sldoc]', pane).forEach(function (a) { a.addEventListener('click', function (e) {   /* R-2 c: the voucher behind a stock line */
+      e.preventDefault(); var P0 = appView(); if (P0) P0(a.getAttribute('data-sldoc'));
+    }); });
     var qi = $('[data-q]', pane);
     if (qi) qi.addEventListener('input', function () { q = qi.value; var pos = qi.selectionStart; show().then(function () { var n = $('[data-q]'); if (n) { n.focus(); n.setSelectionRange(pos, pos); } }); });
     $$('[data-filt]', pane).forEach(function (b) { b.addEventListener('click', function () { filt = b.getAttribute('data-filt'); show(); }); });
     $$('[data-form]', pane).forEach(function (b) { b.addEventListener('click', function () { form(b.getAttribute('data-form'), null, b.getAttribute('data-for')); }); });
     $$('[data-min]', pane).forEach(function (b) { b.addEventListener('click', function () { minForm(b.getAttribute('data-min')); }); });
+    $$('[data-ro]', pane).forEach(function (b) { b.addEventListener('click', function () { minForm(b.getAttribute('data-ro')); }); });
+    $$('[data-mkpo]', pane).forEach(function (b) { b.addEventListener('click', function () { makePo(b.getAttribute('data-mkpo')); }); });
+    var st0 = $('[data-stkset]', pane); if (st0) st0.addEventListener('click', setForm);
     $$('[data-edit]', pane).forEach(function (b) { b.addEventListener('click', function () { var d = D().filter(function (x) { return x.id === b.getAttribute('data-edit'); })[0]; if (d) form(d.kind, d); }); });
     $$('[data-del]', pane).forEach(function (b) { b.addEventListener('click', function () {
       var d = D().filter(function (x) { return x.id === b.getAttribute('data-del'); })[0];

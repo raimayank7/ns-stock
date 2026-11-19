@@ -34,7 +34,7 @@
   /* ---------- manufacturing account ---------- */
   /* expense names that are factory (direct) costs unless the user chose otherwise */
   var DIRECT = /wage|labou?r|factory|power|electric|fuel|coal|carriage in|freight in|inward|job ?work|manufactur|production|machine|consumable|packing material/i;
-  function isDirect(x, direct) { return direct ? direct.indexOf(x.k) >= 0 : DIRECT.test(x.name || '') || DIRECT.test(String(x.k || '').slice(4)); }
+  function isDirect(x, direct) { if (direct) return direct.indexOf(x.k) >= 0; var n = (x.name || '') + ' ' + String(x.k || '').slice(4); return DIRECT.test(n) && !(/salar/i.test(n) && !/factory|production|manufactur/i.test(n)); }   /* F2-10 */
 
   /* which stock items are raw material: used in production or a BOM, and never made */
   function rawItems(docs, items, biz) {
@@ -55,7 +55,7 @@
   function purchasesOf(docs, biz, want, from, to) {
     var b = key(biz), v = 0;
     (docs || []).forEach(function (d) {
-      if (!bizOk(d, b) || B.bounced && B.bounced(d) || d.date < from || d.date > to) return;
+      if (!bizOk(d, b) || B.bounced && B.bounced(d) || d.cancelled || d.date < from || d.date > to) return;
       var sign = d.type === 'pbill' ? (d.kind === 'return' ? -1 : 1) : d.type === 'self' ? 1 : d.type === 'note' && d.side === 'purchase' && d.kind === 'debit' && d.reason === 'ret' ? -1 : 0;
       if (!sign) return;
       (d.items || []).forEach(function (it) {
@@ -100,7 +100,7 @@
   function lastSale(docs, items, biz, date) {
     var o = {}, at = {}, b = key(biz);
     (docs || []).forEach(function (d) {
-      if (!/^(invoice|cashmemo)$/.test(d.type || 'invoice') || !bizOk(d, b) || (d.date || '') > date) return;
+      if (!/^(invoice|cashmemo)$/.test(d.type || 'invoice') || !bizOk(d, b) || d.cancelled || (d.date || '') > date) return;
       (d.items || []).forEach(function (it) { var k = key(it.desc), r = num(it.rate) * (1 - num(it.disc) / 100); if (k && r > 0 && (!at[k] || d.date >= at[k])) { o[k] = r; at[k] = d.date; } });
     });
     (items || []).forEach(function (m) { var k = key(m.desc); if (k && num(m.rate) > 0) o[k] = num(m.rate); });
@@ -216,12 +216,13 @@
 
   /* ---------- receipts and payments (cash and bank only) ---------- */
   var MONEY = { cash: 1, bank: 1 };
+  function isMoney(a) { return MONEY[a] || String(a).indexOf('bank:') === 0; }   /* every bank account is money (several banks) */
   /* head of the other side of a money line: k (code for the screen words), name (English) */
   function rpHead(a, d, v, feeP, firm) {
     var fee = d.type === 'fee' || a.indexOf('p:') === 0 && v > 0 && !!(feeP && feeP[a]);   /* money later received against a fee bill */
-    if (a === 'sales') return { k: fee ? 'fees' : 'sales', name: fee ? 'Fees received' : 'Sales' };
+    if (a === 'sales' || a.indexOf('sales:') === 0) return { k: fee ? 'fees' : 'sales', name: fee ? 'Fees received' : 'Sales' };
     if (a === 'sales-return') return { k: 'sret', name: 'Sales returns refunded' };
-    if (a === 'purchases' || a === 'purchase-return') return { k: 'pur', name: 'Purchases' };
+    if (a === 'purchases' || a === 'purchase-return' || a.indexOf('purchases:') === 0) return { k: 'pur', name: 'Purchases' };
     if (a.indexOf('p:') === 0) return v > 0 ? { k: fee ? 'fees' : firm ? 'recvc' : 'recv', name: fee ? 'Fees received' : firm ? 'Received from customers' : 'Received from customers and members' } : { k: 'paid', name: 'Paid to suppliers' };
     if (/^gst-|^gstcash-/.test(a)) return { k: 'gst', name: 'GST' };
     /* F2-5: salary, payroll dues and staff advances get plain heads (they showed raw codes) */
@@ -237,17 +238,19 @@
     return { k: a, name: a };
   }
   function recPay(docs, biz, from, to, firm) {
-    var cb = B.book(docs, biz, 'cash', from, to), bb = B.book(docs, biz, 'bank', from, to), rec = {}, pay = {};
+    var cb = B.book(docs, biz, 'cash', from, to), rec = {}, pay = {}, bks = { bank: 1 };
+    B.inBooks(docs, biz).forEach(function (d) { B.postings(d).forEach(function (l) { if (isMoney(l.a) && l.a !== 'cash') bks[l.a] = 1; }); });
+    var bb = Object.keys(bks).reduce(function (s, a) { var b = B.book(docs, biz, a, from, to); return { open: r2(s.open + b.open), close: r2(s.close + b.close) }; }, { open: 0, close: 0 });   /* all banks together */
     var feeP = {}; B.inBooks(docs, biz).forEach(function (d) { if (d.type === 'fee') feeP['p:' + key(B.partyName(d))] = 1; });
     function add(T, h, v) { var x = T[h.k] = T[h.k] || { k: h.k, name: h.name, px: h.px || '', rest: h.rest || '', v: 0 }; x.v = r2(x.v + v); }
     B.inBooks(docs, biz).forEach(function (d) {
       var L = B.postings(d), cheq = d.mode === 'cheque' && d.chq && d.chq.st === 'ok' && d.chq.on;
-      var inP = L.some(function (l) { if (!MONEY[l.a]) return false; var dt = l.a === 'bank' && cheq ? d.chq.on : d.date; return dt >= from && dt <= to; });
+      var inP = L.some(function (l) { if (!isMoney(l.a)) return false; var dt = l.a !== 'cash' && cheq ? d.chq.on : d.date; return dt >= from && dt <= to; });
       if (!inP) return;
-      var m = r2(L.reduce(function (s, l) { return s + (MONEY[l.a] ? l.dr - l.cr : 0); }, 0));
+      var m = r2(L.reduce(function (s, l) { return s + (isMoney(l.a) ? l.dr - l.cr : 0); }, 0));
       if (!m) return;   /* cash deposited in the bank and the like: money stays inside */
       var other = {};
-      L.forEach(function (l) { if (!MONEY[l.a]) other[l.a] = r2((other[l.a] || 0) + l.cr - l.dr); });
+      L.forEach(function (l) { if (!isMoney(l.a)) other[l.a] = r2((other[l.a] || 0) + l.cr - l.dr); });
       /* F2-5: only the money that moved is listed. The heads on the money's side share the cash amount; the other side's non-cash lines
          (discount allowed, TDS deducted, profit on sale) are netted out instead of showing up as payments or receipts */
       /* an asset sold: its profit or loss is part of the asset's money, so the sale price and its GST stay whole (F2-19) */
